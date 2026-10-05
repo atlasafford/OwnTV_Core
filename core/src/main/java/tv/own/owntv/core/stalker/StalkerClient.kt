@@ -43,6 +43,16 @@ open class StalkerClient(okHttpClient: OkHttpClient) {
     /** Non-2xx portal response, carrying the status so callers can retry transient 429/5xx. */
     class StalkerHttpException(val code: Int, message: String) : IOException(message)
 
+    /**
+     * `create_link` answered with an empty `cmd` and named a reason ([portalError], e.g.
+     * "nothing_to_play") — a real 200 OK, not a dead token. Distinct from [StalkerAuthException] so
+     * [StalkerAuthManager.withAuthRetry] does not burn a re-handshake chasing content that will not
+     * play any differently with a fresh one, and so a caller that knows how to resolve this specific
+     * item further (see [StreamUrlResolver]'s VOD fallback) can catch just this.
+     */
+    class CreateLinkEmptyException(val portalError: String?) :
+        IOException("Portal create_link returned no cmd (${portalError ?: "no reason given"})")
+
     /** A successful probe: which API endpoint answered, and the token it handed out. */
     data class Handshake(val apiBase: String, val token: String)
 
@@ -404,6 +414,24 @@ open class StalkerClient(okHttpClient: OkHttpClient) {
         return request(url, mac, token, userAgent) { readVodPage(it) }
     }
 
+    /**
+     * `?type=vod&action=get_ordered_list&movie_id=<catalog id>` — the movie's own playable file(s).
+     *
+     * Confirmed by hand against a real portal: its catalog `cmd` (`/media/<catalogId>.mpg`, the same
+     * one [getVodPage] returns) is a placeholder — [createLink] on it answers `{"error":
+     * "nothing_to_play"}`, a real 200 with no `cmd`, not a dead token. This call's own `cmd` IS
+     * playable directly (some portals also need the real file id — `file_<id>` — minted into a fresh
+     * `create_link` the same way, see [StreamUrlResolver]). Only called as a fallback when the catalog
+     * cmd's own `create_link` fails this exact way, so a portal whose catalog cmd already works never
+     * pays for this extra round trip.
+     */
+    open suspend fun getVodFileLink(
+        apiBase: String, mac: String, token: String, userAgent: String?, catalogId: String,
+    ): VodItem? {
+        val url = "$apiBase?type=vod&action=get_ordered_list&movie_id=${enc(catalogId)}&JsHttpRequest=1-xml"
+        return request(url, mac, token, userAgent) { readVodPage(it) }.items.firstOrNull()
+    }
+
     /** `?type=series&action=get_ordered_list&category=<id>&p=<page>` → one page of series shows + totals. */
     suspend fun getSeriesPage(
         apiBase: String, mac: String, token: String, userAgent: String?, categoryId: String, page: Int,
@@ -634,7 +662,7 @@ open class StalkerClient(okHttpClient: OkHttpClient) {
         val url = "$apiBase?type=${enc(type)}&action=create_link&cmd=${enc(cmd)}$seriesParam&forced_storage=0&disable_ad=0&JsHttpRequest=1-xml"
         val js = request(url, mac, token, userAgent) { readScalarFields(it) }
         val raw = js["cmd"]?.takeIf { it.isNotBlank() }
-            ?: throw StalkerAuthException("Portal create_link returned no cmd — token may have expired")
+            ?: throw CreateLinkEmptyException(js["error"])
         val resolved = stripCmdPrefix(raw)
         Log.i(TAG, "create_link inCmd=${redactForLog(cmd)} rawOut=${redactForLog(raw)} resolved=${redactForLog(resolved)}")
         return resolved

@@ -42,12 +42,34 @@ class StreamUrlResolver(
         val mac = source.mac?.let { StalkerClient.canonicalizeMac(it) } ?: return direct
         val creds = source.stalkerCredentials(mac)
         return stalkerAuth.withAuthRetry(creds) { session ->
-            stalkerClient.createLink(
-                session.apiBase, mac, session.token, creds.userAgent, storedUrl,
-                type = if (vod) "vod" else "itv", episode = episode,
-            )
+            try {
+                stalkerClient.createLink(
+                    session.apiBase, mac, session.token, creds.userAgent, storedUrl,
+                    type = if (vod) "vod" else "itv", episode = episode,
+                )
+            } catch (e: StalkerClient.CreateLinkEmptyException) {
+                // Confirmed by hand on a real portal (vod only — a movie, never a live channel or an
+                // already-resolved episode cmd): the catalog's own cmd (`/media/<catalogId>.mpg`) is a
+                // placeholder this portal's create_link refuses outright ("nothing_to_play"). The real
+                // playable file has its OWN id, surfaced only by asking the catalog item about itself —
+                // minted the same way everywhere else, via create_link, just on that file's cmd instead.
+                val catalogId = (if (vod && episode == null) vodCatalogId(storedUrl) else null)
+                    ?: throw e
+                val file = stalkerClient.getVodFileLink(session.apiBase, mac, session.token, creds.userAgent, catalogId)
+                    ?: throw e
+                val fileCmd = file.cmd?.takeIf { it.isNotBlank() } ?: throw e
+                val directFile = StalkerClient.stripCmdPrefix(fileCmd)
+                if (StalkerClient.isDirectPlayUrl(directFile)) directFile
+                else stalkerClient.createLink(
+                    session.apiBase, mac, session.token, creds.userAgent, "/media/file_${file.id}.mpg", type = "vod",
+                )
+            }
         }
     }
+
+    /** The catalog id embedded in a Stalker movie's stored cmd (`/media/995480.mpg` → `"995480"`). */
+    private fun vodCatalogId(storedUrl: String): String? =
+        Regex("""/media/(\d+)\.\w+""").find(StalkerClient.stripCmdPrefix(storedUrl))?.groupValues?.get(1)
 
     /**
      * Phase E (§5.6) — mint a playable archive URL for a past programme on a catch-up channel.

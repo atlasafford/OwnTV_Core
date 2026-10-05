@@ -70,6 +70,92 @@ class StreamUrlResolverTest {
         assertEquals("placeholder cmd must resolve via create_link", 1, client.createLinkCalls)
     }
 
+    // --- VOD fallback: a catalog cmd create_link refuses with "nothing_to_play" ---
+
+    /**
+     * The bug this pins: confirmed by hand against a real portal that the catalog's own cmd
+     * (`/media/<catalogId>.mpg`) is a placeholder — create_link on it answers `{"error":
+     * "nothing_to_play"}`, not a dead token. The real file is found by asking the catalog item about
+     * itself (`get_ordered_list&movie_id=<catalogId>`), whose own cmd can already be playable.
+     */
+    @Test fun resolve_vodNothingToPlayFallsBackToTheMovieIdLookup() = runBlocking {
+        val client = RecordingClient(resolved = "http://realhost/direct-from-lookup.m3u8?token=x")
+        client.emptyForCmds = setOf("/media/995480.mpg")
+        client.vodFileLink = StalkerClient.VodItem(
+            id = "8064608", name = "Gurov And Anna",
+            cmd = "http://45.155.89.207:9207/path/index.m3u8",
+            poster = null, year = null, plot = null, rating = null, categoryId = null, addedAt = null,
+        )
+        val r = resolver(client = client)
+        val source = stalkerSource("/media/995480.mpg")
+        assertEquals(
+            "http://45.155.89.207:9207/path/index.m3u8",
+            r.resolve(source, "/media/995480.mpg", vod = true),
+        )
+        assertEquals("995480", client.lastMovieIdLookup)
+    }
+
+    /** When the lookup's own cmd is STILL a placeholder, mint it with create_link on the real file id. */
+    @Test fun resolve_vodNothingToPlayMintsTheRealFileIdWhenTheLookupCmdIsAlsoAPlaceholder() = runBlocking {
+        val client = RecordingClient(resolved = "http://realhost/minted.m3u8?token=x")
+        client.emptyForCmds = setOf("/media/995480.mpg")
+        client.vodFileLink = StalkerClient.VodItem(
+            id = "8064608", name = "Gurov And Anna", cmd = "/media/file_8064608.mpg",
+            poster = null, year = null, plot = null, rating = null, categoryId = null, addedAt = null,
+        )
+        val r = resolver(client = client)
+        val source = stalkerSource("/media/995480.mpg")
+        assertEquals(
+            "http://realhost/minted.m3u8?token=x",
+            r.resolve(source, "/media/995480.mpg", vod = true),
+        )
+        assertEquals("/media/file_8064608.mpg", client.lastCmd)
+        assertEquals(2, client.createLinkCalls)
+    }
+
+    /** A live channel's "nothing_to_play" is never the VOD fallback's business — it must rethrow as-is. */
+    @Test fun resolve_liveNothingToPlayNeverTriesTheVodFallback() = runBlocking {
+        val client = RecordingClient()
+        client.emptyForCmds = setOf("ffrt http://localhost/ch/1")
+        val r = resolver(client = client)
+        val source = stalkerSource("ffrt http://localhost/ch/1")
+        val ex = runCatching { r.resolve(source, "ffrt http://localhost/ch/1", vod = false) }.exceptionOrNull()
+        assertTrue(ex is StalkerClient.CreateLinkEmptyException)
+        assertNull("a live failure must never touch the movie_id lookup", client.lastMovieIdLookup)
+    }
+
+    /** A series episode's "nothing_to_play" is also not this fallback's business — it has its own cmd shape. */
+    @Test fun resolve_seriesEpisodeNothingToPlayNeverTriesTheVodFallback() = runBlocking {
+        val client = RecordingClient()
+        client.emptyForCmds = setOf("/media/995480.mpg")
+        val r = resolver(client = client)
+        val source = stalkerSource("/media/995480.mpg")
+        val ex = runCatching { r.resolve(source, "/media/995480.mpg", vod = true, episode = 3) }.exceptionOrNull()
+        assertTrue(ex is StalkerClient.CreateLinkEmptyException)
+        assertNull(client.lastMovieIdLookup)
+    }
+
+    /** No catalog id can be found in the cmd (an unexpected shape) — rethrow rather than guess. */
+    @Test fun resolve_vodNothingToPlayWithUnparseableCmdRethrows() = runBlocking {
+        val client = RecordingClient()
+        client.emptyForCmds = setOf("/weird/shape")
+        val r = resolver(client = client)
+        val source = stalkerSource("/weird/shape")
+        val ex = runCatching { r.resolve(source, "/weird/shape", vod = true) }.exceptionOrNull()
+        assertTrue(ex is StalkerClient.CreateLinkEmptyException)
+    }
+
+    /** The lookup itself coming back empty (no file at all) is also a rethrow, not a crash. */
+    @Test fun resolve_vodNothingToPlayWithNoLookupResultRethrows() = runBlocking {
+        val client = RecordingClient()
+        client.emptyForCmds = setOf("/media/995480.mpg")
+        client.vodFileLink = null
+        val r = resolver(client = client)
+        val source = stalkerSource("/media/995480.mpg")
+        val ex = runCatching { r.resolve(source, "/media/995480.mpg", vod = true) }.exceptionOrNull()
+        assertTrue(ex is StalkerClient.CreateLinkEmptyException)
+    }
+
     // --- C-3: every resolve is a FRESH resolve (never cached) ---
 
     @Test fun resolve_everyCallIsFresh_createLinkRunsEachTime() = runBlocking {
@@ -317,6 +403,11 @@ class StreamUrlResolverTest {
         // Bypass okhttp entirely (the real constructor builds a client we never use).
         constructor() : this(resolved = "http://realhost/out.m3u8")
 
+        /** cmd values that must answer `error=nothing_to_play` instead of the canned [resolved] URL. */
+        var emptyForCmds: Set<String> = emptySet()
+        var vodFileLink: VodItem? = null
+        var lastMovieIdLookup: String? = null
+
         override suspend fun createLink(
             apiBase: String, mac: String, token: String, userAgent: String?, cmd: String, type: String, episode: Int?,
         ): String {
@@ -324,8 +415,16 @@ class StreamUrlResolverTest {
             lastCmd = cmd
             lastType = type
             lastEpisode = episode
+            if (cmd in emptyForCmds) throw CreateLinkEmptyException("nothing_to_play")
             // stripCmdPrefix on the way out, mirroring the real client.
             return stripCmdPrefix(resolved)
+        }
+
+        override suspend fun getVodFileLink(
+            apiBase: String, mac: String, token: String, userAgent: String?, catalogId: String,
+        ): VodItem? {
+            lastMovieIdLookup = catalogId
+            return vodFileLink
         }
 
         var shortEpgEntries: List<ShortEpgEntry> = emptyList()

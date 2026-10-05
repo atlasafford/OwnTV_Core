@@ -3065,6 +3065,7 @@
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$apiBase?type=stb&action=handshake&token=&JsHttpRequest=1-xml
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$apiBase?type=vod&action=get_categories&JsHttpRequest=1-xml
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$apiBase?type=vod&action=get_ordered_list&category=${enc(categoryId)}&sortby=added&p=$page&JsHttpRequest=1-xml
+1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$apiBase?type=vod&action=get_ordered_list&movie_id=${enc(catalogId)}&JsHttpRequest=1-xml
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$root/portal.php
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$root/server/load.php
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	$root/stalker_portal/server/load.php
@@ -3097,7 +3098,7 @@
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2721 Safari/533.3
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	No portal API endpoint candidates for $portalUrl
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Portal accepted the handshake but returned an empty profile — the MAC may not be authorized
-1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Portal create_link returned no cmd — token may have expired
+1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Portal create_link returned no cmd (${portalError ?: "no reason given"})
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Portal guide exceeded $MAX_GUIDE_BYTES bytes
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Portal handshake returned no token
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	Portal rejected the request (HTTP $code)
@@ -3127,6 +3128,7 @@
 2	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	descr
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	description
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	enable_tv_archive
+1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	error
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	ffmpeg
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	ffrt
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	ffrt2
@@ -3144,6 +3146,7 @@
 2	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	mac=${URLEncoder.encode(mac, "UTF-8")}; stb_lang=en; timezone=${TimeZone.getDefault().id}
 3	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	max_page_items
 7	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	name
+1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	no reason given
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	number
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	o_name
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StalkerClient.kt	poster
@@ -3186,12 +3189,14 @@
 1	json	core/src/main/java/tv/own/owntv/core/stalker/StalkerExpiry.kt	null
 1	json	core/src/main/java/tv/own/owntv/core/stalker/StalkerExpiry.kt	phone
 1	json	core/src/main/java/tv/own/owntv/core/stalker/StalkerExpiry.kt	tariff_expired_date
+1	regex	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	/media/(\\d+)\\.\\w+
+1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	/media/file_${file.id}.mpg
 2	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	Stalker source ${source.id} has no valid MAC
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	itv
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	resolveCatchup is Stalker-only
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	shortEpg is Stalker-only
 1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	tv_archive
-1	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	vod
+2	protocol	core/src/main/java/tv/own/owntv/core/stalker/StreamUrlResolver.kt	vod
 1	file-path	core/src/main/java/tv/own/owntv/core/storage/MediaFolders.kt	$SERIES/${StorageAccess.sanitize(showName)}/$SEASON_PREFIX $seasonNumber
 1	file-path	core/src/main/java/tv/own/owntv/core/storage/MediaFolders.kt	Movies
 1	file-path	core/src/main/java/tv/own/owntv/core/storage/MediaFolders.kt	Season
