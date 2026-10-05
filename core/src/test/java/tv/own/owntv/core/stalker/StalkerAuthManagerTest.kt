@@ -3,12 +3,15 @@ package tv.own.owntv.core.stalker
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -168,5 +171,80 @@ class StalkerAuthManagerTest {
         assertEquals(StalkerAuthManager.MIN_SESSION_TTL_MS, StalkerAuthManager.sessionTtlMs(mapOf("watchdog_timeout" to "10")))
         // …nor one that says "a day" have us trusting a token that long.
         assertEquals(StalkerAuthManager.MAX_SESSION_TTL_MS, StalkerAuthManager.sessionTtlMs(mapOf("watchdog_timeout" to "86400")))
+    }
+
+    // --- the throttled-portal handshake storm: a failed openSession must not re-probe on every ask ---
+
+    /**
+     * A client whose handshake can be told to fail a fixed number of times before it starts working,
+     * or to hang forever (awaiting [hangForever]) so a test can cancel a caller mid-handshake.
+     */
+    private class FailingThenOkClient(private var failuresLeft: Int) : StalkerClient(okhttp3.OkHttpClient()) {
+        var handshakes = 0
+        var hangForever: CompletableDeferred<Unit>? = null
+        /** Fired the instant a handshake attempt starts, before it can suspend on [hangForever]. */
+        var onHandshakeStarted: (() -> Unit)? = null
+        override suspend fun resolveHandshake(portalUrl: String, mac: String, userAgent: String?): Handshake {
+            handshakes++
+            onHandshakeStarted?.invoke()
+            hangForever?.await()
+            if (failuresLeft > 0) {
+                failuresLeft--
+                throw StalkerHttpException(429, "HTTP 429 for $portalUrl")
+            }
+            return Handshake(apiBase = "http://portal/portal.php", token = "t$handshakes")
+        }
+
+        override suspend fun getProfile(
+            apiBase: String, mac: String, token: String, userAgent: String?, identity: StalkerDeviceIdentity,
+        ): Map<String, String> = mapOf("status" to "1")
+    }
+
+    /**
+     * The bug this pins: an Add fires several independent callers at the session for one source (the
+     * XMLTV probe, then live/movies/series) before any of them has a token. If the portal throttles
+     * that very first handshake, every one of those callers used to run its own full probe — the
+     * actual mechanism behind the handshake storm a real portal was observed sending 429 after 429 to.
+     * One failure must now answer all of them.
+     */
+    @Test fun sessionFor_aBurstAfterAThrottledHandshakeAsksOnlyOnce() = runBlocking {
+        val client = FailingThenOkClient(failuresLeft = 10)
+        val auth = StalkerAuthManager(client)
+        val attempts = 5
+        val results = (1..attempts).map {
+            async { runCatching { auth.sessionFor(creds) } }
+        }.awaitAll()
+
+        assertEquals("the burst must produce exactly one real handshake attempt", 1, client.handshakes)
+        assertTrue("every caller in the burst must see a failure, not a hang or a wrong success", results.all { it.isFailure })
+    }
+
+    // Note: the window itself (RECENT_FAILURE_MS expiring) isn't exercised here — this module's unit
+    // tests run with isReturnDefaultValues = true, which stubs SystemClock.elapsedRealtime() to a
+    // constant 0L, so no real delay() can ever move it. The replay-within-the-window behavior above
+    // and the invalidate()-clears-it behavior are what a unit test can actually prove; confirmed on a
+    // real device that a source genuinely re-handshakes on its next sync after a throttled one.
+
+    /** A caller being cancelled is not the portal saying no — it must not poison the cache for anyone else. */
+    @Test fun sessionFor_aCancelledCallerDoesNotPoisonTheFailureCacheForOthers() = runBlocking {
+        val client = FailingThenOkClient(failuresLeft = 0)
+        val reachedHandshake = CompletableDeferred<Unit>()
+        client.hangForever = CompletableDeferred<Unit>().also { gate ->
+            // Signal once resolveHandshake is actually suspended on the gate, so the test cancels at a
+            // deterministic point instead of racing a yield() against the launched coroutine.
+            client.onHandshakeStarted = { reachedHandshake.complete(Unit) }
+        }
+        val auth = StalkerAuthManager(client)
+        val job = launch {
+            // Cancelled while resolveHandshake is suspended — it never gets to return or throw a real
+            // portal error, only a CancellationException.
+            auth.sessionFor(creds)
+        }
+        reachedHandshake.await()
+        job.cancelAndJoin()
+        client.hangForever = null // the cancelled attempt's gate would otherwise hang every retry too
+
+        val session = auth.sessionFor(creds)
+        assertEquals("a cancellation must never replay as a cached portal failure", "t2", session.token)
     }
 }

@@ -123,7 +123,7 @@ open class StalkerClient(okHttpClient: OkHttpClient) {
      */
     open suspend fun resolveHandshake(portalUrl: String, mac: String, userAgent: String? = null): Handshake {
         var lastError: Exception? = null
-        apiCandidates(portalUrl).forEach { apiBase ->
+        for (apiBase in apiCandidates(portalUrl)) {
             try {
                 val token = handshake(apiBase, mac, userAgent)
                 Log.i(TAG, "handshake ok apiBase=$apiBase")
@@ -132,6 +132,15 @@ open class StalkerClient(okHttpClient: OkHttpClient) {
                 throw c
             } catch (e: Exception) {
                 Log.w(TAG, "handshake candidate failed apiBase=$apiBase message=${e.message}")
+                // 429 is the portal itself answering "slow down" for THIS endpoint, not "wrong
+                // endpoint" — trying the next candidate immediately only piles two more requests onto
+                // an already unhappy portal. Stop the probe here; the caller's own retry/backoff
+                // decides what happens next, same as it already does for a throttled page fetch.
+                // 403/5xx are deliberately excluded: on first contact (no candidate confirmed working
+                // yet) either can just as easily mean "a WAF sits in front of this one path" — a real
+                // Stalker deployment has answered exactly that on portal.php while stalker_portal/…
+                // worked fine — and stopping here would abandon the probe before ever reaching it.
+                if (e is StalkerHttpException && e.code == 429) throw e
                 lastError = e
             }
         }

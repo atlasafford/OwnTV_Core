@@ -2,6 +2,7 @@ package tv.own.owntv.core.stalker
 
 import android.os.SystemClock
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
@@ -52,20 +53,47 @@ open class StalkerAuthManager(private val client: StalkerClient) {
 
     private val sessions = ConcurrentHashMap<Long, StalkerSession>()
     private val locks = ConcurrentHashMap<Long, Mutex>()
+    private val recentFailures = ConcurrentHashMap<Long, Pair<Long, Exception>>()
 
-    /** Cached session if still fresh, else a full handshake → get_profile round trip. */
+    /**
+     * Cached session if still fresh, else a full handshake → get_profile round trip.
+     *
+     * A sync has several independent callers that each want a session up front (the XMLTV probe,
+     * the live/movies/series phases) — the mutex already serializes them onto ONE [openSession] call,
+     * but a portal that is throttled answers that one call with a throttle too, and nothing before
+     * this cached the fact that it just said no. Every one of those callers then queued up to try
+     * the exact same doomed handshake again, which is what actually floods an already-unhappy portal
+     * (see [StalkerClient.resolveHandshake]'s matching fix for the probe itself). [recentFailures]
+     * replays that answer to anyone asking again inside [RECENT_FAILURE_MS] instead of re-asking.
+     */
     suspend fun sessionFor(creds: StalkerCredentials): StalkerSession {
         sessions[creds.sourceId]?.takeIf { !it.isExpired }?.let { return it }
         return locks.getOrPut(creds.sourceId) { Mutex() }.withLock {
             // Re-check under the lock — a concurrent caller may have just handshaken.
             sessions[creds.sourceId]?.takeIf { !it.isExpired }?.let { return it }
-            openSession(creds).also { sessions[creds.sourceId] = it }
+            recentFailures[creds.sourceId]?.let { (atMs, error) ->
+                if (SystemClock.elapsedRealtime() - atMs < RECENT_FAILURE_MS) throw error
+            }
+            try {
+                openSession(creds).also {
+                    sessions[creds.sourceId] = it
+                    recentFailures.remove(creds.sourceId)
+                }
+            } catch (c: CancellationException) {
+                // This caller being cancelled says nothing about the portal — never let it masquerade
+                // as a portal failure that every OTHER caller then gets replayed for free.
+                throw c
+            } catch (e: Exception) {
+                recentFailures[creds.sourceId] = SystemClock.elapsedRealtime() to e
+                throw e
+            }
         }
     }
 
     /** Drop the cached session so the next call re-handshakes (used on auth failure & source edit/delete). */
     fun invalidate(sourceId: Long) {
         sessions.remove(sourceId)
+        recentFailures.remove(sourceId)
     }
 
     /**
@@ -139,6 +167,17 @@ open class StalkerAuthManager(private val client: StalkerClient) {
 
     companion object {
         private const val TAG = "StalkerAuth"
+
+        /**
+         * How long a failed [openSession] is remembered, so the other callers an Add/sync fires off at
+         * once (the XMLTV probe, then live/movies/series) get that one answer instead of each queuing
+         * up for their own identical, doomed handshake. Kept BELOW `StalkerSyncer`'s own page-retry
+         * span (750ms, 1500ms — `PAGE_RETRY_DELAY_MS * attempt`) so a page fetch's own retry, which
+         * genuinely waits out a throttle before trying again, never gets handed a stale answer instead
+         * of a real attempt; it only needs to be long enough to catch callers that ask within the same
+         * burst, not ones that return seconds later on their own backoff.
+         */
+        internal const val RECENT_FAILURE_MS = 500L
 
         /** Used when the portal states no `watchdog_timeout`, or states one we cannot believe. */
         internal const val DEFAULT_SESSION_TTL_MS = 5 * 60_000L
